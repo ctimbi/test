@@ -1,0 +1,59 @@
+{
+  "project_info": {
+    "project_number": "803268989023",
+    "firebase_url": "https://test-2a7f8.firebaseio.com",
+    "project_id": "test-2a7f8",
+    "storage_bucket": "test-2a7f8.appspot.com"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:803268989023:android:c63f81ebe9ed7000",
+        "android_client_info": {
+          "package_name": "com.gmail.ctimbi.test"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "803268989023-3m820ssia9hshjbl32qjo0jee1df88ko.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.gmail.ctimbi.test",
+            "certificate_hash": "0496042726f67178bd99347e38a45e0300d0fd50"
+          }
+        },
+        {
+          "client_id": "803268989023-8dhpih6c4kl0oi4p67rnp695qjcpi12v.apps.googleusercontent.com",
+          "client_type": 3
+        },
+        {
+          "client_id": "803268989023-8dhpih6c4kl0oi4p67rnp695qjcpi12v.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAYGTqTmzqI7975eK50anmLAwcfXSaTAas"
+        }
+      ],
+      "services": {
+        "analytics_service": {
+          "status": 1
+        },
+        "appinvite_service": {
+          "status": 2,
+          "other_platform_oauth_client": [
+            {
+              "client_id": "803268989023-8dhpih6c4kl0oi4p67rnp695qjcpi12v.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        },
+        "ads_service": {
+          "status": 2
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
