@@ -1,10 +1,7 @@
-import { Injectable } from "@angular/core";
 import { Platform } from "ionic-angular";
+import { Injectable } from '@angular/core';
 import { AngularFireAuth } from "angularfire2/auth";
-import {
-  AngularFirestore,
-  AngularFirestoreDocument
-} from "angularfire2/firestore";
+import { AngularFirestore, AngularFirestoreDocument } from "angularfire2/firestore";
 import * as firebase from "firebase/app";
 
 import { Observable } from "rxjs/Observable";
@@ -14,8 +11,15 @@ import { Facebook } from "@ionic-native/facebook";
 
 import * as Chance from 'chance';
 
+/*
+  Generated class for the AuthProvider provider.
+
+  See https://angular.io/guide/dependency-injection for more info on providers
+  and Angular DI.
+*/
 @Injectable()
 export class AuthProvider {
+
   user: Observable<any>;
 
   constructor(
@@ -34,6 +38,9 @@ export class AuthProvider {
       })
     );
   }
+  /*constructor(public http: HttpClient) {
+    console.log('Hello AuthProvider Provider');
+  }*/
 
   //// FACEBOOK ////
 
@@ -88,14 +95,6 @@ export class AuthProvider {
     return userRef.set(data, { merge: true });
   }
 
-  //// ANONYMOUS ////
-
-  async anonymousLogin(): Promise<void> {
-    const user = await this.afAuth.auth.signInAnonymously();
-    await this.updateUserData(user);
-  }
-
-  //// HELPERS ////
 
   async logout(): Promise<any> {
     return this.afAuth.auth.signOut();
@@ -111,4 +110,5 @@ export class AuthProvider {
     const user = await this.getCurrentUser();
     return !!user;
   }
+
 }
