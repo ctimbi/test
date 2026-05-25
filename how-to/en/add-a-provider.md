@@ -1,0 +1,133 @@
+# How to add a new provider
+
+Goal: run the harness against a different LLM backend — OpenAI, Bedrock, a local Ollama, or a mock for tests.
+
+The `Provider` interface ([`internal/provider/provider.go`](../../internal/provider/provider.go)) is three methods. Implementing them in a new file is the entire change at the abstraction layer; the agent loop, tools, compaction, and TUI don't know which backend they're talking to.
+
+## Steps
+
+### 1. Create `internal/provider/your_provider.go`
+
+```go
+package provider
+
+import (
+	"context"
+
+	"github.com/betta-tech/byo-coding-agent/internal/api"
+)
+
+type YourProvider struct {
+	client    *yourSDK.Client
+	model     string
+	system    string
+	maxTokens int
+}
+
+func NewYourProvider(model, system string, maxTokens int) *YourProvider {
+	return &YourProvider{
+		client:    yourSDK.NewClient(),
+		model:     model,
+		system:    system,
+		maxTokens: maxTokens,
+	}
+}
+
+func (p *YourProvider) Model() string        { return p.model }
+func (p *YourProvider) SetModel(name string) { p.model = name }
+
+func (p *YourProvider) Send(ctx context.Context, messages []api.Message, tools []api.ToolDef) (api.Response, error) {
+	req := p.toRequest(messages, tools)        // ↓ adapter
+	sdkResp, err := p.client.Chat(ctx, req)
+	if err != nil {
+		return api.Response{}, err
+	}
+	return p.fromResponse(sdkResp), nil        // ↓ adapter
+}
+```
+
+The two private methods (`toRequest`, `fromResponse`) are the only places SDK types are allowed to appear. If a `yourSDK.Foo` shows up anywhere else in the codebase, the abstraction has leaked.
+
+### 2. Implement the two translation methods
+
+`toRequest` maps `[]api.Message` → the SDK's native message shape, and `[]api.ToolDef` → the SDK's tool shape. Look at [`internal/provider/anthropic.go`](../../internal/provider/anthropic.go)'s `toMessages` and `toTools` for the reference pattern.
+
+For OpenAI specifically:
+
+| api type | OpenAI mapping |
+|---|---|
+| `Message{Role: User}` | `{role: "user", content: ...}` |
+| `Message{Role: Assistant}` with `BlockToolUse` | `{role: "assistant", tool_calls: [...]}` |
+| `BlockToolResult` | A separate `{role: "tool", tool_call_id: ..., content: ...}` message |
+| `system` (top-level field) | First message: `{role: "system", content: ...}` |
+
+The `tool_result` shape is OpenAI's biggest divergence: results are their own messages with `role: "tool"`, not blocks inside a user message. Your `toRequest` has to flatten one `api.Message` containing multiple `BlockToolResult` blocks into multiple OpenAI messages.
+
+`fromResponse` does the reverse: SDK content/tool_calls/finish_reason → `api.Response{Content, StopReason, Usage}`.
+
+### 3. Wire it into `main.go`
+
+Change one line:
+
+```go
+// Before
+llm := provider.NewAnthropicProvider(anthropic.ModelClaudeOpus4_7, 8192, sysPrompt)
+
+// After
+llm := provider.NewYourProvider("gpt-4o", sysPrompt, 8192)
+```
+
+Build, run. The rest of the harness is unchanged.
+
+## Conventions
+
+- **Only the new file imports the SDK.** This is the test for whether the abstraction is real. If you find SDK types leaking into `internal/agent/`, `internal/tool/`, or `main.go`, fix it now — it'll be much harder later.
+- **`Send` must populate `Usage`** if you want `/tokens` to work. Map the provider's per-call token counts into `api.Usage`. Cache fields can be zero if the provider doesn't expose them.
+- **`StopReason` is a three-way enum** — `StopEndTurn` (model is done), `StopToolUse` (model wants tools), `StopOther` (everything else: max_tokens, refusal, etc.). The agent loop only branches on `StopToolUse`.
+- **Sort tool definitions before sending.** Map iteration in Go is random; consecutive requests with the "same" tools can serialize to different bytes, which breaks prompt caching. The Anthropic adapter handles this in the registry layer — copy the pattern.
+
+## Mock provider for tests
+
+The harness ships one already: [`internal/provider/mock.go`](../../internal/provider/mock.go). It implements `Provider` with a slice of canned responses, optional `RepeatLast` semantics for "loop forever" tests, an `Err` field for exercising error paths, and call-capture so tests can assert on the messages and tools the agent built up:
+
+```go
+p := provider.NewMockProvider(
+    api.Response{
+        StopReason: api.StopToolUse,
+        Content: []api.Block{{Type: api.BlockToolUse, ToolUseID: "t1", ToolName: "echo"}},
+    },
+    api.Response{
+        StopReason: api.StopEndTurn,
+        Content:    []api.Block{{Type: api.BlockText, Text: "done"}},
+    },
+)
+a := agent.New(p, "", reg)
+got, _ := a.Send(ctx, "hi")
+p.LastSent() // messages passed to the most recent Send
+p.Calls()    // how many round-trips ran
+```
+
+[`internal/agent/agent_test.go`](../../internal/agent/agent_test.go) uses it to test the agent loop end-to-end without burning API tokens: a text-only happy path, a tool-use round-trip, the MaxTurns clamp, and provider-error propagation. Copy that file as a starting point when you want to test your own provider or strategy.
+
+## Token tracking (optional)
+
+If your provider can report token usage, add a non-interface `TotalUsage()` method that returns cumulative session counts. The `/tokens` slash command type-asserts on this method (see [`follow_along/en/16-token-viewer.md`](../../follow_along/en/16-token-viewer.md)) — implement it and the token viewer just works.
+
+## Worked example: the OpenAI provider
+
+[`internal/provider/openai.go`](../../internal/provider/openai.go) is a complete second provider, implementing the same `Provider` interface against OpenAI's Chat Completions API. Read it side-by-side with `anthropic.go` to see the translation patterns in practice — the same `api.Message` slice fans out into very different SDK shapes:
+
+| Concept | Anthropic shape | OpenAI shape |
+|---|---|---|
+| System prompt | Top-level field on the request | First message with `role:"system"` in the array |
+| Tool result | Block inside a user-role message | Separate message with `role:"tool"` |
+| Tool definition | `properties` + `required` as two fields | One JSON Schema object wrapping both |
+| Stop reason | `end_turn` / `tool_use` | `stop` / `tool_calls` |
+| Cache reporting | `cache_creation_input_tokens` + `cache_read_input_tokens` | `prompt_tokens_details.cached_tokens` only |
+
+The interface absorbs all of that; the agent loop and tools don't care which is in use. Switch at runtime with `LLM_PROVIDER=openai` (and optionally `LLM_MODEL=gpt-5-codex`).
+
+## See also
+
+- [`follow_along/en/03-the-provider-interface.md`](../../follow_along/en/03-the-provider-interface.md) for why the interface looks the way it does.
+- [`internal/provider/anthropic.go`](../../internal/provider/anthropic.go) and [`internal/provider/openai.go`](../../internal/provider/openai.go) for the two reference implementations.

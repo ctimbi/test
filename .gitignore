@@ -1,35 +1,24 @@
-# Specifies intentionally untracked files to ignore when using Git
-# http://git-scm.com/docs/gitignore
+# Compiled binaries (anchored to repo root so they don't match cmd/sitegen/ etc.)
+/harness
+/sitegen
 
-*~
-*.sw[mnpcod]
+# Runtime artifacts (compaction logs, etc.)
 *.log
-*.tmp
-*.tmp.*
-log.txt
-*.sublime-project
-*.sublime-workspace
-.vscode/
-npm-debug.log*
 
+# Local MCP server config — may contain auth tokens. Track mcp.example.json instead.
+mcp.json
+
+# Agent memory store (chapter 19). May contain project paths, user names,
+# or other context worth keeping local.
+.harness/
+
+# Generated static site (cmd/sitegen output). CI rebuilds and deploys it.
+site/
+
+# Editor / IDE
 .idea/
-.sourcemaps/
-.sass-cache/
-.tmp/
-.versions/
-coverage/
-dist/
-node_modules/
-tmp/
-temp/
-hooks/
-platforms/
-plugins/
-plugins/android.json
-plugins/ios.json
-www/
-$RECYCLE.BIN/
+.vscode/
+*.swp
 
+# OS
 .DS_Store
-Thumbs.db
-UserInterfaceState.xcuserstate
