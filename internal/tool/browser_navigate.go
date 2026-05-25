@@ -25,6 +25,10 @@ func (BrowserNavigateTool) Definition() api.ToolDef {
 				"type":        "string",
 				"description": "The URL to navigate to.",
 			},
+			"timeout_seconds": map[string]any{
+				"type":        "integer",
+				"description": "Seconds to wait for the page to load. Default 60.",
+			},
 		},
 		Required: []string{"url"},
 	}
@@ -32,13 +36,19 @@ func (BrowserNavigateTool) Definition() api.ToolDef {
 
 func (BrowserNavigateTool) Execute(_ context.Context, rawInput string) (string, bool) {
 	var in struct {
-		URL string `json:"url"`
+		URL            string `json:"url"`
+		TimeoutSeconds int    `json:"timeout_seconds"`
 	}
 	if err := json.Unmarshal([]byte(rawInput), &in); err != nil {
 		return fmt.Sprintf("invalid input: %v", err), true
 	}
-	ctx, cancel := context.WithTimeout(browser.Get(), 30*time.Second)
+	if in.TimeoutSeconds <= 0 {
+		in.TimeoutSeconds = 60
+	}
+
+	ctx, cancel := context.WithTimeout(browser.Get(), time.Duration(in.TimeoutSeconds)*time.Second)
 	defer cancel()
+
 	var currentURL string
 	err := chromedp.Run(ctx,
 		chromedp.Navigate(in.URL),
@@ -46,7 +56,9 @@ func (BrowserNavigateTool) Execute(_ context.Context, rawInput string) (string, 
 		chromedp.Location(&currentURL),
 	)
 	if err != nil {
-		return fmt.Sprintf("navigate error: %v", err), true
+		// Reset the tab so subsequent tool calls start from a clean state.
+		browser.Reset()
+		return fmt.Sprintf("navigate error (tab reset): %v", err), true
 	}
 	return fmt.Sprintf("navigated to: %s", currentURL), false
 }
