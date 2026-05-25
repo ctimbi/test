@@ -62,31 +62,50 @@ func (MoodleLoginTool) Execute(_ context.Context, rawInput string) (string, bool
 		return fmt.Sprintf("navigate error: %v", err), true
 	}
 
-	fmt.Println("\n[moodle_login] Browser is open — please log in. Waiting for up to", in.TimeoutMinutes, "minutes...")
+	fmt.Printf("\n[moodle_login] Browser is open — please log in. Waiting for up to %d minutes...\n", in.TimeoutMinutes)
+
+	// JS that returns true via multiple signals (handles themes that omit body.loggedin)
+	const isLoggedIn = `(function(){
+  if (document.body.classList.contains('loggedin')) return true;
+  if (window.M && window.M.cfg && M.cfg.userid && M.cfg.userid > 0) return true;
+  var bd = document.body.dataset;
+  if (bd && bd.userid && bd.userid !== '0') return true;
+  if (document.querySelector('.usermenu,[data-region="user-menu"],.userinfo')) return true;
+  return false;
+})()`
 
 	deadline := time.Now().Add(timeout)
+	lastPrint := time.Now()
 	for time.Now().Before(deadline) {
 		time.Sleep(time.Second)
 
+		remaining := time.Until(deadline).Round(time.Second)
+		if time.Since(lastPrint) >= 30*time.Second {
+			fmt.Printf("[moodle_login] still waiting... %v remaining\n", remaining)
+			lastPrint = time.Now()
+		}
+
 		var loggedIn bool
 		var currentURL string
-
 		err := chromedp.Run(ctx,
 			chromedp.Location(&currentURL),
-			// body.loggedin is the canonical Moodle indicator for an authenticated session
-			chromedp.Evaluate(`document.body.classList.contains('loggedin')`, &loggedIn),
+			chromedp.Evaluate(isLoggedIn, &loggedIn),
 		)
 		if err != nil {
-			return fmt.Sprintf("browser error: %v", err), true
+			// transient CDP error — keep trying unless context is done
+			if ctx.Err() != nil {
+				return fmt.Sprintf("browser error: %v", err), true
+			}
+			continue
 		}
 
 		if loggedIn {
 			var username string
 			_ = chromedp.Run(ctx, chromedp.Evaluate(
-				`document.querySelector('.usermenu .usertext, [data-username], .userinfo')?.textContent?.trim() || ''`,
+				`(document.querySelector('.usermenu .usertext,[data-username],.userinfo')?.textContent||'').trim().split('\n')[0]`,
 				&username,
 			))
-			username = strings.TrimSpace(strings.Split(username, "\n")[0])
+			username = strings.TrimSpace(username)
 			if username != "" {
 				return fmt.Sprintf("logged in as %s", username), false
 			}
@@ -94,5 +113,5 @@ func (MoodleLoginTool) Execute(_ context.Context, rawInput string) (string, bool
 		}
 	}
 
-	return fmt.Sprintf("timeout after %d minutes — if you are already logged in, please tell me and I will continue", in.TimeoutMinutes), true
+	return fmt.Sprintf("timeout after %d minutes — if you are already logged in, just tell me and I will continue", in.TimeoutMinutes), true
 }
