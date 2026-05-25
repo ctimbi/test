@@ -1,6 +1,4 @@
-// Package main wires the harness together. The interesting code lives in
-// the internal/ packages — this file constructs the root Agent, registers
-// any subagents and their delegate tools, and launches the Bubble Tea TUI.
+// Package main wires the harness together.
 package main
 
 import (
@@ -12,8 +10,6 @@ import (
 	"sync"
 
 	"github.com/anthropics/anthropic-sdk-go"
-
-	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/ctimbi/test/internal/agent"
 	"github.com/ctimbi/test/internal/api"
@@ -68,17 +64,11 @@ var rootAgent *agent.Agent
 // with the same prompt mid-session.
 var activeSysPrompt string
 
-// activeProgram is the Bubble Tea program, exposed at package scope so
-// slash commands can send messages into the UI (e.g. DebugToggleMsg).
-var activeProgram *tea.Program
+// activeIDE is the running IDE, exposed so slash commands can interact with it.
+var activeIDE *ui.IDE
 
-// notifyDebugUI sends a DebugToggleMsg into the running program so it
-// recomputes layout. Called from /debug after flipping state.
-func notifyDebugUI() {
-	if activeProgram != nil {
-		activeProgram.Send(ui.DebugToggleMsg{})
-	}
-}
+// notifyDebugUI is a no-op in the new IDE (debug panel not yet ported).
+func notifyDebugUI() {}
 
 // envTruthy reports whether an env var is set to a value humans normally
 // mean as "yes". Kept tiny on purpose: the harness has no central config
@@ -192,55 +182,33 @@ func main() {
 		}
 		return api.Usage{}, -1
 	}
-	program := ui.NewProgram(runner, usageFunc)
-	activeProgram = program
+	ide := ui.NewIDE(runner, usageFunc)
+	activeIDE = ide
 
-	// debug events from anywhere in the harness push a refresh into the TUI
-	// so the panel updates in near-real-time.
-	debug.SetSink(func(_ debug.Event) {
-		program.Send(ui.DebugRefreshMsg{})
-	})
+	debug.SetSink(func(_ debug.Event) {}) // debug panel not yet ported
 
-	// HARNESS_DEBUG=1 (or true/yes/on) starts the session with the debug
-	// panel already recording, so the very first request to the provider
-	// is captured without having to type /debug on after launch. The
-	// equivalent runtime toggle is `/debug` in commands.go; this is just
-	// the startup-time shortcut. We set the flag *after* SetSink above so
-	// the first recorded event already has a refresh path into the UI.
 	if envTruthy("HARNESS_DEBUG") {
 		debug.SetEnabled(true)
 	}
 
-	// Now that we have a program to send progress events into, kick off
-	// MCP server connection in the background. The TUI shows a loading
-	// line while this runs; the user can already type and the agent can
-	// already work (with whatever tools are registered so far) before
-	// MCP servers finish connecting.
 	mcpWG.Add(1)
 	go func() {
 		defer mcpWG.Done()
 		clients := setupMCP(mcpCtx, func(server string, status mcp.ProgressStatus, total int) {
-			program.Send(ui.MCPStatusMsg{Server: server, Status: status, Total: total})
+			msg := fmt.Sprintf("MCP %s: %v", server, status)
+			ide.SetMCPStatus(msg)
 		})
 		mcpClientsMu.Lock()
 		mcpClients = clients
 		mcpClientsMu.Unlock()
+		ide.SetMCPStatus("") // clear once done
 	}()
 
-	// Confirm: a goroutine-safe function the agent calls when it wants y/n.
-	// It posts an ApprovalRequest to the program and waits on the reply
-	// channel. The program's Update flips into stateAwaitingApproval, the
-	// user picks, and we resume. detail is optional long-form content
-	// (e.g. a diff for write_file calls) shown in a modal.
 	rootAgent.Confirm = func(prompt, detail string) bool {
-		reply := make(chan bool, 1)
-		program.Send(ui.ApprovalRequest{Prompt: prompt, Detail: detail, Reply: reply})
-		return <-reply
+		return ide.Confirm(prompt, detail)
 	}
 
-	// Redirect stdout into the program. Every existing fmt.Println in the
-	// agent, tools, and commands flows through the pipe → forwarder
-	// goroutine → ui.AppendMsg → viewport. No refactor of print sites.
+	// Redirect stdout → pipe → active session output.
 	originalStdout := os.Stdout
 	r, w, err := os.Pipe()
 	if err != nil {
@@ -248,19 +216,19 @@ func main() {
 		return
 	}
 	os.Stdout = w
-	ui.SuppressSpinner = true // status bar replaces the legacy spinner
+	ui.SuppressSpinner = true
 
 	go func() {
 		scanner := bufio.NewScanner(r)
 		scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 		for scanner.Scan() {
-			program.Send(ui.AppendMsg(scanner.Text() + "\n"))
+			ide.Append(scanner.Text() + "\n")
 		}
 	}()
 
-	if _, err := program.Run(); err != nil {
+	if err := ide.Run(); err != nil {
 		os.Stdout = originalStdout
-		fmt.Fprintf(originalStdout, "program error: %v\n", err)
+		fmt.Fprintf(originalStdout, "ide error: %v\n", err)
 		return
 	}
 	os.Stdout = originalStdout
