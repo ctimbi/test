@@ -20,7 +20,7 @@ func init() { Default.Register(&MoodleLoginTool{}) }
 func (MoodleLoginTool) Definition() api.ToolDef {
 	return api.ToolDef{
 		Name:        "moodle_login",
-		Description: "Open the Moodle login page in the browser and wait for the user to log in manually. Returns once the user is logged in. Session cookies are persisted so subsequent calls are not needed.",
+		Description: "Open the Moodle login page in the browser and wait for the user to log in manually. Detects login automatically via the body.loggedin CSS class that Moodle adds after authentication.",
 		InputSchema: map[string]any{
 			"base_url": map[string]any{
 				"type":        "string",
@@ -54,36 +54,45 @@ func (MoodleLoginTool) Execute(_ context.Context, rawInput string) (string, bool
 	ctx, cancel := context.WithTimeout(browser.Get(), timeout)
 	defer cancel()
 
-	// Navigate to login page
-	if err := chromedp.Run(ctx, chromedp.Navigate(loginURL)); err != nil {
+	// Navigate to login page and wait for it to load
+	if err := chromedp.Run(ctx,
+		chromedp.Navigate(loginURL),
+		chromedp.WaitReady("body", chromedp.ByQuery),
+	); err != nil {
 		return fmt.Sprintf("navigate error: %v", err), true
 	}
 
-	// Poll every second until the URL moves away from /login/index.php
+	fmt.Println("\n[moodle_login] Browser is open — please log in. Waiting for up to", in.TimeoutMinutes, "minutes...")
+
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		time.Sleep(time.Second)
 
+		var loggedIn bool
 		var currentURL string
-		if err := chromedp.Run(ctx, chromedp.Location(&currentURL)); err != nil {
-			// browser may have been closed
+
+		err := chromedp.Run(ctx,
+			chromedp.Location(&currentURL),
+			// body.loggedin is the canonical Moodle indicator for an authenticated session
+			chromedp.Evaluate(`document.body.classList.contains('loggedin')`, &loggedIn),
+		)
+		if err != nil {
 			return fmt.Sprintf("browser error: %v", err), true
 		}
 
-		if !strings.Contains(currentURL, "/login/index.php") {
-			// Extract logged-in username if available
+		if loggedIn {
 			var username string
-			_ = chromedp.Run(ctx, chromedp.Text(
-				".usermenu .usertext, [data-username], .userinfo .username",
-				&username, chromedp.ByQuery,
+			_ = chromedp.Run(ctx, chromedp.Evaluate(
+				`document.querySelector('.usermenu .usertext, [data-username], .userinfo')?.textContent?.trim() || ''`,
+				&username,
 			))
-			username = strings.TrimSpace(username)
+			username = strings.TrimSpace(strings.Split(username, "\n")[0])
 			if username != "" {
-				return fmt.Sprintf("logged in as %s — current page: %s", username, currentURL), false
+				return fmt.Sprintf("logged in as %s", username), false
 			}
 			return fmt.Sprintf("login detected — current page: %s", currentURL), false
 		}
 	}
 
-	return fmt.Sprintf("timeout: user did not log in within %d minutes", in.TimeoutMinutes), true
+	return fmt.Sprintf("timeout after %d minutes — if you are already logged in, please tell me and I will continue", in.TimeoutMinutes), true
 }
