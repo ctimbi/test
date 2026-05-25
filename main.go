@@ -185,6 +185,15 @@ func main() {
 	ide := ui.NewIDE(runner, usageFunc)
 	activeIDE = ide
 
+	// Wire moodle_list_courses results into the sidebar course tree.
+	tool.OnCoursesLoaded = func(entries []tool.CourseEntry) {
+		nodes := make([]ui.CourseNode, len(entries))
+		for i, e := range entries {
+			nodes[i] = ui.CourseNode{ID: e.ID, Name: e.Name, URL: e.URL}
+		}
+		ide.SetCourses(nodes)
+	}
+
 	debug.SetSink(func(_ debug.Event) {}) // debug panel not yet ported
 
 	if envTruthy("HARNESS_DEBUG") {

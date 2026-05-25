@@ -118,6 +118,49 @@ const domScript = `
 })()
 `
 
+// CourseEntry is a successfully parsed Moodle course.
+type CourseEntry struct {
+	ID   string
+	Name string
+	URL  string
+}
+
+// OnCoursesLoaded is called after moodle_list_courses succeeds with at least
+// one course. Wire this up in main.go to push courses into the IDE sidebar.
+var OnCoursesLoaded func([]CourseEntry)
+
+// parseCourseList extracts a []CourseEntry from the raw any value that
+// chromedp.Evaluate returns (a []interface{} of map[string]interface{}).
+func parseCourseList(raw any) []CourseEntry {
+	arr, ok := raw.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]CourseEntry, 0, len(arr))
+	for _, item := range arr {
+		m, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		id, _ := m["id"].(string)
+		name, _ := m["name"].(string)
+		url, _ := m["url"].(string)
+		if name != "" {
+			out = append(out, CourseEntry{ID: id, Name: name, URL: url})
+		}
+	}
+	return out
+}
+
+func notifyCourses(raw any) {
+	if OnCoursesLoaded == nil {
+		return
+	}
+	if entries := parseCourseList(raw); len(entries) > 0 {
+		OnCoursesLoaded(entries)
+	}
+}
+
 func (MoodleListCoursesTool) Execute(_ context.Context, rawInput string) (string, bool) {
 	var in struct {
 		BaseURL string `json:"base_url"`
@@ -148,10 +191,12 @@ func (MoodleListCoursesTool) Execute(_ context.Context, rawInput string) (string
 				// API returned an error — log and fall through to DOM.
 				_ = errMsg
 			} else {
+				notifyCourses(apiResult)
 				b, _ := json.MarshalIndent(apiResult, "", "  ")
 				return string(b), false
 			}
 		} else if apiResult != nil {
+			notifyCourses(apiResult)
 			b, _ := json.MarshalIndent(apiResult, "", "  ")
 			return string(b), false
 		}
@@ -165,6 +210,7 @@ func (MoodleListCoursesTool) Execute(_ context.Context, rawInput string) (string
 	if domResult == nil {
 		return "no courses found — check that you are logged in and the page loaded correctly", true
 	}
+	notifyCourses(domResult)
 	b, _ := json.MarshalIndent(domResult, "", "  ")
 	return string(b), false
 }
