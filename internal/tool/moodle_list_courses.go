@@ -20,7 +20,7 @@ func init() { Default.Register(&MoodleListCoursesTool{}) }
 func (MoodleListCoursesTool) Definition() api.ToolDef {
 	return api.ToolDef{
 		Name:        "moodle_list_courses",
-		Description: "List all courses for the logged-in user by navigating to /my/courses.php. Returns a JSON array with id, name, and url for each course.",
+		Description: "List all enrolled courses for the logged-in user. Navigates to /my/courses.php and calls the Moodle AJAX API using the browser session (no external token needed). Falls back to DOM scraping if the API is unavailable.",
 		InputSchema: map[string]any{
 			"base_url": map[string]any{
 				"type":        "string",
@@ -31,6 +31,93 @@ func (MoodleListCoursesTool) Definition() api.ToolDef {
 	}
 }
 
+// apiScript calls Moodle's internal AJAX service using synchronous XHR.
+// window.M.cfg is injected by every Moodle page and contains the sesskey
+// needed to authenticate the request. No external token is required.
+const apiScript = `
+(function() {
+  var cfg = window.M && window.M.cfg;
+  if (!cfg || !cfg.sesskey) return null;
+
+  var url = cfg.wwwroot + '/lib/ajax/service.php'
+            + '?sesskey=' + cfg.sesskey
+            + '&info=core_course_get_enrolled_courses_by_timeline_classification';
+
+  var body = JSON.stringify([{
+    index: 0,
+    methodname: 'core_course_get_enrolled_courses_by_timeline_classification',
+    args: {
+      offset: 0,
+      limit: 0,
+      classification: 'all',
+      sort: 'fullname',
+      customfieldname: '',
+      customfieldvalue: ''
+    }
+  }]);
+
+  try {
+    var xhr = new XMLHttpRequest();
+    xhr.open('POST', url, false);                      // false = synchronous
+    xhr.setRequestHeader('Content-Type', 'application/json');
+    xhr.send(body);
+
+    if (xhr.status !== 200) return { error: 'HTTP ' + xhr.status };
+
+    var resp = JSON.parse(xhr.responseText);
+    if (!resp[0] || resp[0].error) return { error: JSON.stringify(resp[0]) };
+    if (!resp[0].data || !resp[0].data.courses) return { error: 'no courses key in response' };
+
+    return resp[0].data.courses.map(function(c) {
+      return {
+        id:       String(c.id),
+        name:     c.fullname,
+        short:    c.shortname,
+        category: c.coursecategory || null,
+        url:      cfg.wwwroot + '/course/view.php?id=' + c.id,
+        progress: typeof c.progress === 'number' ? c.progress : null
+      };
+    });
+  } catch(e) {
+    return { error: e.message };
+  }
+})()
+`
+
+// domScript is the fallback when the API call fails.
+// Uses data-course-id containers and reads the full name from
+// span.multiline[title] (the visible span truncates with '…').
+const domScript = `
+(function() {
+  var seen = {};
+  var results = [];
+  document.querySelectorAll('[data-region="course-content"][data-course-id]').forEach(function(card) {
+    var id = card.dataset.courseId;
+    if (!id || seen[id]) return;
+    seen[id] = true;
+
+    var nameEl = card.querySelector('span.multiline[title]');
+    var name = nameEl ? nameEl.getAttribute('title') : null;
+    if (!name) {
+      var link = card.querySelector('a.coursename, a.aalink');
+      name = link ? link.textContent.trim().replace(/\s+/g, ' ') : null;
+    }
+    var link = card.querySelector('a[href*="/course/view.php"]');
+    var category = card.querySelector('.categoryname');
+
+    if (name && link) {
+      results.push({
+        id:       id,
+        name:     name,
+        category: category ? category.textContent.trim() : null,
+        url:      link.href
+      });
+    }
+  });
+  return results.length ? results : null;
+})()
+`
+
 func (MoodleListCoursesTool) Execute(_ context.Context, rawInput string) (string, bool) {
 	var in struct {
 		BaseURL string `json:"base_url"`
@@ -39,60 +126,45 @@ func (MoodleListCoursesTool) Execute(_ context.Context, rawInput string) (string
 		return fmt.Sprintf("invalid input: %v", err), true
 	}
 	in.BaseURL = strings.TrimRight(in.BaseURL, "/")
-	coursesURL := in.BaseURL + "/my/courses.php"
-
-	// Extract every distinct course link on the page.
-	// Works on Moodle 3.x, 4.x and any theme because it targets the stable
-	// href pattern (/course/view.php?id=N) rather than theme-specific classes.
-	const extractCourses = `
-(function() {
-  const seen = new Set();
-  const results = [];
-  document.querySelectorAll('a[href*="/course/view.php"]').forEach(a => {
-    try {
-      const u = new URL(a.href);
-      const id = u.searchParams.get('id');
-      if (!id || seen.has(id)) return;
-      seen.add(id);
-
-      // Try to find a meaningful name from the nearest card/box ancestor
-      let name = '';
-      const card = a.closest(
-        '[data-courseid],[data-course-id],.card,.coursebox,.course-card,.dashboard-card'
-      );
-      if (card) {
-        const title = card.querySelector(
-          'h4,h3,h2,.coursename,.card-title,.dashboard-card-title,[data-region="course-name"]'
-        );
-        name = (title || a).textContent.trim().replace(/\s+/g, ' ');
-      } else {
-        name = a.textContent.trim().replace(/\s+/g, ' ');
-      }
-      if (name) results.push({ id, name, url: a.href });
-    } catch(_) {}
-  });
-  return results;
-})()
-`
 
 	ctx, cancel := context.WithTimeout(browser.Get(), 60*time.Second)
 	defer cancel()
 
-	var result any
+	// Navigate to the courses page so window.M.cfg is available.
 	err := chromedp.Run(ctx,
-		chromedp.Navigate(coursesURL),
+		chromedp.Navigate(in.BaseURL+"/my/courses.php"),
 		chromedp.WaitReady("body", chromedp.ByQuery),
-		chromedp.Sleep(2*time.Second), // let JS render the course cards
-		chromedp.Evaluate(extractCourses, &result),
+		chromedp.Sleep(2*time.Second),
 	)
 	if err != nil {
-		return fmt.Sprintf("error: %v", err), true
+		return fmt.Sprintf("navigate error: %v", err), true
 	}
 
-	b, _ := json.MarshalIndent(result, "", "  ")
-	out := string(b)
-	if out == "null" || out == "[]" {
-		return "no courses found — make sure you are logged in and the page loaded correctly", true
+	// Try the AJAX API first.
+	var apiResult any
+	if err := chromedp.Run(ctx, chromedp.Evaluate(apiScript, &apiResult)); err == nil {
+		if m, ok := apiResult.(map[string]any); ok {
+			if errMsg, hasErr := m["error"]; hasErr {
+				// API returned an error — log and fall through to DOM.
+				_ = errMsg
+			} else {
+				b, _ := json.MarshalIndent(apiResult, "", "  ")
+				return string(b), false
+			}
+		} else if apiResult != nil {
+			b, _ := json.MarshalIndent(apiResult, "", "  ")
+			return string(b), false
+		}
 	}
-	return out, false
+
+	// Fallback: scrape the DOM.
+	var domResult any
+	if err := chromedp.Run(ctx, chromedp.Evaluate(domScript, &domResult)); err != nil {
+		return fmt.Sprintf("dom extract error: %v", err), true
+	}
+	if domResult == nil {
+		return "no courses found — check that you are logged in and the page loaded correctly", true
+	}
+	b, _ := json.MarshalIndent(domResult, "", "  ")
+	return string(b), false
 }
