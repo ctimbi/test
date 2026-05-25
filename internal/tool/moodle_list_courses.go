@@ -20,11 +20,11 @@ func init() { Default.Register(&MoodleListCoursesTool{}) }
 func (MoodleListCoursesTool) Definition() api.ToolDef {
 	return api.ToolDef{
 		Name:        "moodle_list_courses",
-		Description: "List all courses visible on the Moodle dashboard for the logged-in user. Returns a JSON array with id, name, and url for each course.",
+		Description: "List all courses for the logged-in user by navigating to /my/courses.php. Returns a JSON array with id, name, and url for each course.",
 		InputSchema: map[string]any{
 			"base_url": map[string]any{
 				"type":        "string",
-				"description": "Root URL of the Moodle site.",
+				"description": "Root URL of the Moodle site, e.g. https://moodle.example.com",
 			},
 		},
 		Required: []string{"base_url"},
@@ -39,50 +39,60 @@ func (MoodleListCoursesTool) Execute(_ context.Context, rawInput string) (string
 		return fmt.Sprintf("invalid input: %v", err), true
 	}
 	in.BaseURL = strings.TrimRight(in.BaseURL, "/")
+	coursesURL := in.BaseURL + "/my/courses.php"
 
-	ctx, cancel := context.WithTimeout(browser.Get(), 30*time.Second)
-	defer cancel()
-
+	// Extract every distinct course link on the page.
+	// Works on Moodle 3.x, 4.x and any theme because it targets the stable
+	// href pattern (/course/view.php?id=N) rather than theme-specific classes.
 	const extractCourses = `
 (function() {
-  // Try multiple selectors used across Moodle themes
-  const selectors = [
-    '[data-courseid]',
-    '.courseoverview-course',
-    '.coursebox',
-    '.dashboard-card',
-  ];
-  let items = [];
-  for (const sel of selectors) {
-    items = Array.from(document.querySelectorAll(sel));
-    if (items.length > 0) break;
-  }
-  return items.map(el => {
-    const link = el.querySelector('a[href*="/course/view.php"]') || el.querySelector('a');
-    return {
-      id: el.dataset.courseid || null,
-      name: (
-        el.querySelector('.media-body h4, h4.media-heading, .course-info-container h4, .coursename, .dashboard-card-title')
-        || link
-      )?.textContent?.trim(),
-      url: link?.href || null,
-    };
-  }).filter(c => c.name);
+  const seen = new Set();
+  const results = [];
+  document.querySelectorAll('a[href*="/course/view.php"]').forEach(a => {
+    try {
+      const u = new URL(a.href);
+      const id = u.searchParams.get('id');
+      if (!id || seen.has(id)) return;
+      seen.add(id);
+
+      // Try to find a meaningful name from the nearest card/box ancestor
+      let name = '';
+      const card = a.closest(
+        '[data-courseid],[data-course-id],.card,.coursebox,.course-card,.dashboard-card'
+      );
+      if (card) {
+        const title = card.querySelector(
+          'h4,h3,h2,.coursename,.card-title,.dashboard-card-title,[data-region="course-name"]'
+        );
+        name = (title || a).textContent.trim().replace(/\s+/g, ' ');
+      } else {
+        name = a.textContent.trim().replace(/\s+/g, ' ');
+      }
+      if (name) results.push({ id, name, url: a.href });
+    } catch(_) {}
+  });
+  return results;
 })()
 `
 
-	err := chromedp.Run(ctx,
-		chromedp.Navigate(in.BaseURL+"/my/"),
-		chromedp.WaitReady("body", chromedp.ByQuery),
-	)
-	if err != nil {
-		return fmt.Sprintf("navigate error: %v", err), true
-	}
+	ctx, cancel := context.WithTimeout(browser.Get(), 60*time.Second)
+	defer cancel()
 
 	var result any
-	if err := chromedp.Run(ctx, chromedp.Evaluate(extractCourses, &result)); err != nil {
-		return fmt.Sprintf("extract error: %v", err), true
+	err := chromedp.Run(ctx,
+		chromedp.Navigate(coursesURL),
+		chromedp.WaitReady("body", chromedp.ByQuery),
+		chromedp.Sleep(2*time.Second), // let JS render the course cards
+		chromedp.Evaluate(extractCourses, &result),
+	)
+	if err != nil {
+		return fmt.Sprintf("error: %v", err), true
 	}
+
 	b, _ := json.MarshalIndent(result, "", "  ")
-	return string(b), false
+	out := string(b)
+	if out == "null" || out == "[]" {
+		return "no courses found — make sure you are logged in and the page loaded correctly", true
+	}
+	return out, false
 }

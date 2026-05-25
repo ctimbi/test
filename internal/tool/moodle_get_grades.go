@@ -20,7 +20,7 @@ func init() { Default.Register(&MoodleGetGradesTool{}) }
 func (MoodleGetGradesTool) Definition() api.ToolDef {
 	return api.ToolDef{
 		Name:        "moodle_get_grades",
-		Description: "Fetch the grade report for the logged-in student in a given course. Returns a JSON array of {item, grade, feedback} objects.",
+		Description: "Fetch the grade report for the logged-in student in a course. Returns a JSON array of grade items.",
 		InputSchema: map[string]any{
 			"base_url": map[string]any{
 				"type":        "string",
@@ -46,37 +46,47 @@ func (MoodleGetGradesTool) Execute(_ context.Context, rawInput string) (string, 
 	in.BaseURL = strings.TrimRight(in.BaseURL, "/")
 	gradesURL := fmt.Sprintf("%s/grade/report/user/index.php?id=%d", in.BaseURL, in.CourseID)
 
-	ctx, cancel := context.WithTimeout(browser.Get(), 30*time.Second)
-	defer cancel()
-
+	// Works for both the classic table (table.user-grade) and the newer
+	// Moodle 4.x layout which uses a different table structure.
 	const extractGrades = `
 (function() {
-  const rows = Array.from(document.querySelectorAll('table.user-grade tr'));
+  // Try both old and new grade table selectors
+  const table = document.querySelector('table.user-grade, table[id*="grade"], .gradereport-user-wrapper table');
+  if (!table) return [];
+
+  const rows = Array.from(table.querySelectorAll('tr'));
   return rows.slice(1).map(row => {
-    const cells = row.querySelectorAll('td, th');
+    const cells = Array.from(row.querySelectorAll('td,th'));
+    if (cells.length < 2) return null;
     return {
-      item: cells[0]?.textContent?.trim(),
-      grade: cells[1]?.textContent?.trim(),
-      range: cells[2]?.textContent?.trim(),
-      percentage: cells[3]?.textContent?.trim(),
-      feedback: cells[4]?.textContent?.trim(),
+      item:       cells[0]?.textContent?.trim()?.replace(/\s+/g, ' ') || null,
+      grade:      cells[1]?.textContent?.trim() || null,
+      range:      cells[2]?.textContent?.trim() || null,
+      percentage: cells[3]?.textContent?.trim() || null,
+      feedback:   cells[4]?.textContent?.trim() || null,
     };
-  }).filter(r => r.item);
+  }).filter(r => r && r.item);
 })()
 `
 
-	err := chromedp.Run(ctx,
-		chromedp.Navigate(gradesURL),
-		chromedp.WaitReady("table.user-grade, #page-grade-report-user-index", chromedp.ByQuery),
-	)
-	if err != nil {
-		return fmt.Sprintf("navigate error: %v", err), true
-	}
+	ctx, cancel := context.WithTimeout(browser.Get(), 60*time.Second)
+	defer cancel()
 
 	var result any
-	if err := chromedp.Run(ctx, chromedp.Evaluate(extractGrades, &result)); err != nil {
-		return fmt.Sprintf("extract error: %v", err), true
+	err := chromedp.Run(ctx,
+		chromedp.Navigate(gradesURL),
+		chromedp.WaitReady("body", chromedp.ByQuery),
+		chromedp.Sleep(2*time.Second),
+		chromedp.Evaluate(extractGrades, &result),
+	)
+	if err != nil {
+		return fmt.Sprintf("error: %v", err), true
 	}
+
 	b, _ := json.MarshalIndent(result, "", "  ")
-	return string(b), false
+	out := string(b)
+	if out == "null" || out == "[]" {
+		return "no grade data found — check course_id and that you are logged in", true
+	}
+	return out, false
 }

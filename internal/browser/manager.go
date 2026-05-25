@@ -26,7 +26,7 @@ var (
 // created via context.WithTimeout(browser.Get(), d) never propagate
 // cancellation back to tabCtx and never close the Chrome tab.
 type mergedCtx struct {
-	context.Context        // deadline / Done from the caller (Background = never)
+	context.Context        // deadline / Done from caller (Background = never closes)
 	vals            context.Context // chromedp target values from tabCtx
 }
 
@@ -34,9 +34,7 @@ func (c mergedCtx) Value(key any) any { return c.vals.Value(key) }
 
 func ensureAlloc() {
 	allocOnce.Do(func() {
-		if err := os.MkdirAll(".harness/chrome-profile", 0o755); err == nil {
-			// best-effort
-		}
+		_ = os.MkdirAll(".harness/chrome-profile", 0o755)
 		opts := append(chromedp.DefaultExecAllocatorOptions[:],
 			chromedp.UserDataDir(".harness/chrome-profile"),
 			chromedp.Flag("headless", false),
@@ -56,37 +54,31 @@ func ensureTab() {
 	if tabCtx == nil || tabCtx.Err() != nil {
 		ensureAlloc()
 		tabCtx, _ = chromedp.NewContext(allocCtx)
-		// Warm up the tab so Chrome is visible immediately.
+		// Warm up: establish the CDP connection so Chrome is ready.
 		_ = chromedp.Run(tabCtx, chromedp.ActionFunc(func(ctx context.Context) error {
 			return nil
 		}))
 	}
 }
 
-// Get returns a "view" of the persistent tab.  Tools should call
-// context.WithTimeout(browser.Get(), d) to bound their operations — when
-// that timeout fires the tab is NOT closed; only the tool's action is
-// aborted.
+// Get returns a "view" of the persistent tab. Tools call
+// context.WithTimeout(browser.Get(), d) to bound their actions — when
+// the timeout fires the tab is NOT closed; only the current action aborts.
 func Get() context.Context {
 	ensureTab()
-	// Return a merged context whose Done/Deadline come from Background
-	// (i.e. never cancel on their own) but whose Value() chain reaches
-	// through to tabCtx so chromedp can locate the browser target.
 	return mergedCtx{Context: context.Background(), vals: tabCtx}
 }
 
-// Reset closes the current tab and opens a fresh one.  Call this when the
-// tab is in an unrecoverable state (e.g. after a hard navigation abort).
+// Reset discards the current tab and opens a fresh one in the same Chrome
+// window. Call this after an unrecoverable navigation error.
 func Reset() {
 	tabMu.Lock()
-	defer tabMu.Unlock()
-	tabCtx = nil // next ensureTab() call will recreate
+	tabCtx = nil
 	tabMu.Unlock()
 	ensureTab()
-	tabMu.Lock()
 }
 
-// Close shuts down the Chrome process.  Call this at program exit.
+// Close shuts down the Chrome process. Call this at program exit.
 func Close() {
 	if allocStop != nil {
 		allocStop()

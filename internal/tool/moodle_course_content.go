@@ -19,11 +19,11 @@ func init() { Default.Register(&MoodleCourseContentTool{}) }
 func (MoodleCourseContentTool) Definition() api.ToolDef {
 	return api.ToolDef{
 		Name:        "moodle_course_content",
-		Description: "Return the section structure and activity list for a Moodle course. Navigate to the course first or pass its URL directly.",
+		Description: "Return the section and activity list for a Moodle course page. Pass the full course URL (e.g. .../course/view.php?id=42).",
 		InputSchema: map[string]any{
 			"course_url": map[string]any{
 				"type":        "string",
-				"description": "Full URL of the course page, e.g. https://moodle.example.com/course/view.php?id=42",
+				"description": "Full URL of the course page.",
 			},
 		},
 		Required: []string{"course_url"},
@@ -38,47 +38,64 @@ func (MoodleCourseContentTool) Execute(_ context.Context, rawInput string) (stri
 		return fmt.Sprintf("invalid input: %v", err), true
 	}
 
-	ctx, cancel := context.WithTimeout(browser.Get(), 30*time.Second)
-	defer cancel()
-
+	// Covers Moodle 3.x (.section.main) and 4.x (li[data-sectionid])
 	const extractContent = `
 (function() {
-  const sections = Array.from(document.querySelectorAll(
-    '.course-content .section.main, .course-content li[id^="section-"]'
-  ));
+  // Section containers differ between Moodle versions
+  const secSelectors = [
+    'li[data-sectionid]',
+    '.course-content .section.main',
+    '.course-content li[id^="section-"]',
+  ];
+  let sections = [];
+  for (const sel of secSelectors) {
+    sections = Array.from(document.querySelectorAll(sel));
+    if (sections.length) break;
+  }
+
   return sections.map(sec => {
-    const activities = Array.from(sec.querySelectorAll('.activity')).map(act => {
-      const link = act.querySelector('a');
+    const nameEl = sec.querySelector(
+      '.sectionname,.section-title h3,.section-title h4,.section-title a,h3[class*="section"]'
+    );
+    const activities = Array.from(sec.querySelectorAll('.activity,[data-activityname]')).map(act => {
+      const link = act.querySelector('a[href]');
       const typeMatch = act.className.match(/modtype_(\w+)/);
+      const nameEl2 = act.querySelector('.instancename,.activityname,[data-activityname]');
       return {
-        id: act.id,
+        id: act.id || null,
         type: act.dataset.type || (typeMatch ? typeMatch[1] : null),
-        name: (act.querySelector('.instancename, .activityname') || link)?.textContent?.trim()?.replace(/\s+/g, ' '),
+        name: (nameEl2 || link)?.textContent?.trim()?.replace(/\s+/g, ' ') || null,
         url: link?.href || null,
-        completion: act.querySelector('[data-completion-state]')?.dataset?.completionState || null,
       };
-    });
+    }).filter(a => a.name);
+
     return {
-      id: sec.id,
-      name: sec.querySelector('.sectionname, .section-title')?.textContent?.trim() || null,
+      id: sec.id || sec.dataset.sectionid || null,
+      name: nameEl?.textContent?.trim()?.replace(/\s+/g, ' ') || null,
       activities,
     };
   }).filter(s => s.activities.length > 0 || s.name);
 })()
 `
 
-	err := chromedp.Run(ctx,
-		chromedp.Navigate(in.CourseURL),
-		chromedp.WaitReady(".course-content, #page-content", chromedp.ByQuery),
-	)
-	if err != nil {
-		return fmt.Sprintf("navigate error: %v", err), true
-	}
+	ctx, cancel := context.WithTimeout(browser.Get(), 60*time.Second)
+	defer cancel()
 
 	var result any
-	if err := chromedp.Run(ctx, chromedp.Evaluate(extractContent, &result)); err != nil {
-		return fmt.Sprintf("extract error: %v", err), true
+	err := chromedp.Run(ctx,
+		chromedp.Navigate(in.CourseURL),
+		chromedp.WaitReady("body", chromedp.ByQuery),
+		chromedp.Sleep(2*time.Second),
+		chromedp.Evaluate(extractContent, &result),
+	)
+	if err != nil {
+		return fmt.Sprintf("error: %v", err), true
 	}
+
 	b, _ := json.MarshalIndent(result, "", "  ")
-	return string(b), false
+	out := string(b)
+	if out == "null" || out == "[]" {
+		return "no sections found — check that the URL is a course page and you are logged in", true
+	}
+	return out, false
 }
